@@ -10,3 +10,22 @@ html, body, #root {
   overflow: hidden;
   background: #000;
 }
+
+@keyframes logoEffervescent {
+  0%, 100% {
+    transform: translate(-50%, -50%) translateY(0px) scale(1);
+    filter: drop-shadow(0 0 8px rgba(34, 139, 34, 0.58)) drop-shadow(0 0 16px rgba(34, 139, 34, 0.38)) drop-shadow(0 0 24px rgba(34, 139, 34, 0.2));
+  }
+  25% {
+    transform: translate(-50%, -50%) translateY(-3px) scale(1.01);
+    filter: drop-shadow(0 0 10px rgba(34, 139, 34, 0.66)) drop-shadow(0 0 20px rgba(34, 139, 34, 0.45)) drop-shadow(0 0 30px rgba(34, 139, 34, 0.24));
+  }
+  50% {
+    transform: translate(-50%, -50%) translateY(-6px) scale(1.02);
+    filter: drop-shadow(0 0 13px rgba(34, 139, 34, 0.78)) drop-shadow(0 0 26px rgba(34, 139, 34, 0.56)) drop-shadow(0 0 38px rgba(34, 139, 34, 0.3));
+  }
+  75% {
+    transform: translate(-50%, -50%) translateY(-2px) scale(1.01);
+    filter: drop-shadow(0 0 10px rgba(34, 139, 34, 0.68)) drop-shadow(0 0 21px rgba(34, 139, 34, 0.46)) drop-shadow(0 0 31px rgba(34, 139, 34, 0.24));
+  }
+}
