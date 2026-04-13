@@ -41,12 +41,15 @@ const DEFAULT_CONTROLS = {
     spawnThreshold: BAND_TRIGGER_BASE,
     motionGain: 1,
     strokeGain: 1,
+    smoothing: SMOOTHING,
   },
   [MODES.CIRCULAR]: {
     segments: CIRCLE_SEGMENTS,
     trail: CIRCLE_TRAIL_ALPHA,
     spin: CIRCLE_SPIN_SPEED,
     orbGain: 3,
+    kaleidoCount: 4,
+    smoothing: SMOOTHING,
   },
   [MODES.LINE]: {
     snakeCount: LINE_SNAKE_COUNT,
@@ -54,6 +57,7 @@ const DEFAULT_CONTROLS = {
     randomTurn: LINE_RANDOM_TURN,
     transientBoost: LINE_TRANSIENT_BOOST,
     maxLength: LINE_SNAKE_MAX_POINTS,
+    smoothing: SMOOTHING,
   },
 }
 
@@ -433,86 +437,131 @@ export default function Visualizer() {
   const drawCircular = useCallback((ctx, W, H) => {
     const s = stateRef.current
     const cfg = controlsRef.current[MODES.CIRCULAR]
-    const cx = W / 2
-    const cy = H / 2
     const bins = s.dataArray.length
     const totalSegs = Math.max(4, Math.round(cfg.segments)) * 2
+    const kaleidoCount = Math.max(1, Math.min(8, Math.round(cfg.kaleidoCount ?? 4)))
     const wedgeAngle = (Math.PI * 2) / totalSegs
-    const maxR = Math.min(cx, cy) * 0.92
+    const sizeScale = 1 - ((kaleidoCount - 1) / 7) * 0.35
+    const maxR = Math.min(W, H) * 0.18 * sizeScale
     const minR = maxR * 0.06
     const spin = s.hueShift * cfg.spin
 
     ctx.fillStyle = `rgba(0,0,0,${cfg.trail})`
     ctx.fillRect(0, 0, W, H)
 
-    ctx.save()
-    ctx.translate(cx, cy)
-    ctx.rotate(spin)
+    const ringCenters = [
+      { cx: W * 0.22, cy: H * 0.22, phase: 0 },
+      { cx: W * 0.5, cy: H * 0.14, phase: Math.PI / 4 },
+      { cx: W * 0.78, cy: H * 0.22, phase: Math.PI / 2 },
+      { cx: W * 0.86, cy: H * 0.5, phase: (Math.PI * 3) / 4 },
+      { cx: W * 0.78, cy: H * 0.78, phase: Math.PI },
+      { cx: W * 0.5, cy: H * 0.86, phase: (Math.PI * 5) / 4 },
+      { cx: W * 0.22, cy: H * 0.78, phase: (Math.PI * 3) / 2 },
+      { cx: W * 0.14, cy: H * 0.5, phase: (Math.PI * 7) / 4 },
+    ]
+    const centerFocus = { cx: W * 0.5, cy: H * 0.5, phase: 0 }
+    const centerSets = {
+      1: [0],
+      2: [0, 4],
+      3: [0, 2, 5],
+      4: [0, 2, 4, 6],
+      5: [0, 2, 4, 6, 1],
+      6: [0, 2, 4, 6, 1, 5],
+      7: [0, 1, 2, 3, 4, 5, 6],
+      8: [0, 1, 2, 3, 4, 5, 6, 7],
+    }
+    const activeCenters = kaleidoCount === 1
+      ? [centerFocus]
+      : centerSets[kaleidoCount].map((index) => ringCenters[index])
 
-    for (let seg = 0; seg < totalSegs; seg++) {
+    for (const q of activeCenters) {
       ctx.save()
-      ctx.rotate((Math.PI * 2 / totalSegs) * seg)
-      if (seg % 2 === 1) ctx.scale(1, -1)
+      ctx.translate(q.cx, q.cy)
+      ctx.rotate(spin + q.phase)
 
+      for (let seg = 0; seg < totalSegs; seg++) {
+        ctx.save()
+        ctx.rotate((Math.PI * 2 / totalSegs) * seg)
+        if (seg % 2 === 1) ctx.scale(1, -1)
+
+        const segStart = Math.floor((seg / totalSegs) * bins)
+        const segEnd = Math.max(segStart + 1, Math.floor(((seg + 1) / totalSegs) * bins))
+        let peakBin = segStart
+        let peakVal = -1
+        for (let k = segStart; k < segEnd; k++) {
+          const v = normAmp(s.dataArray[k])
+          if (v > peakVal) {
+            peakVal = v
+            peakBin = k
+          }
+        }
+        const segEnergy = rangeEnergy(s.dataArray, segStart, segEnd)
+        const virtualBin = Math.floor((peakBin / Math.max(1, bins - 1)) * 256)
+        const dominantBand = bandFor(virtualBin)
+        const bandIndex = BANDS.findIndex((b) => b.shape === dominantBand.shape)
+        const baseColor = Math.floor((Math.max(0, bandIndex) / Math.max(1, BANDS.length - 1)) * (COLOR_RANGE_COUNT - 1))
+        const energyShift = Math.round(segEnergy * 3)
+        const colorA = baseColor + energyShift
+        const colorB = colorA + 1
+        const colorC = colorA + 2
+
+        ctx.beginPath()
+        for (let i = 0; i < bins; i++) {
+          const amp = normAmp(s.dataArray[i])
+          const r = minR + amp * (maxR - minR)
+          const angle = (i / (bins - 1)) * wedgeAngle - wedgeAngle / 2
+          const x = Math.cos(angle) * r
+          const y = Math.sin(angle) * r
+          i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y)
+        }
+        for (let i = bins - 1; i >= 0; i--) {
+          const angle = (i / (bins - 1)) * wedgeAngle - wedgeAngle / 2
+          ctx.lineTo(Math.cos(angle) * minR, Math.sin(angle) * minR)
+        }
+        ctx.closePath()
+
+        const grad = ctx.createLinearGradient(minR, 0, maxR, 0)
+        grad.addColorStop(0, paletteColor(colorA, 0.4 + segEnergy * 0.22))
+        grad.addColorStop(0.5, paletteColor(colorB, 0.38 + segEnergy * 0.2))
+        grad.addColorStop(1, paletteColor(colorC, 0.34 + segEnergy * 0.18))
+        ctx.fillStyle = grad
+        ctx.fill()
+
+        ctx.beginPath()
+        for (let i = 0; i < bins; i++) {
+          const amp = normAmp(s.dataArray[i])
+          const r = minR + amp * (maxR - minR)
+          const angle = (i / (bins - 1)) * wedgeAngle - wedgeAngle / 2
+          i === 0
+            ? ctx.moveTo(Math.cos(angle) * r, Math.sin(angle) * r)
+            : ctx.lineTo(Math.cos(angle) * r, Math.sin(angle) * r)
+        }
+        const edgeIndex = colorB + 1
+        ctx.strokeStyle = paletteColor(edgeIndex, 0.5 + segEnergy * 0.24)
+        ctx.lineWidth = 1 + segEnergy * 1
+        ctx.shadowColor = paletteColor(edgeIndex, 0.62 + segEnergy * 0.16)
+        ctx.shadowBlur = 6 + segEnergy * 10
+        ctx.stroke()
+        ctx.shadowBlur = 0
+        ctx.restore()
+      }
+
+      const bassAmp = s.dataArray.slice(0, 6).reduce((a, b) => a + normAmp(b), 0) / 6
+      const orbR = minR * (0.9 + bassAmp * cfg.orbGain)
+      const orbGrad = ctx.createRadialGradient(0, 0, 0, 0, 0, orbR)
+      const orbBase = freqRangeIndex(2, bins)
+      orbGrad.addColorStop(0, paletteColor(orbBase + 1, 1))
+      orbGrad.addColorStop(0.4, paletteColor(orbBase + 4, 0.8))
+      orbGrad.addColorStop(1, paletteColor(orbBase + 7, 0))
+      ctx.fillStyle = orbGrad
+      ctx.shadowColor = paletteColor(orbBase + 5, 0.9)
+      ctx.shadowBlur = 24
       ctx.beginPath()
-      for (let i = 0; i < bins; i++) {
-        const amp = normAmp(s.dataArray[i])
-        const r = minR + amp * (maxR - minR)
-        const angle = (i / (bins - 1)) * wedgeAngle - wedgeAngle / 2
-        const x = Math.cos(angle) * r
-        const y = Math.sin(angle) * r
-        i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y)
-      }
-      for (let i = bins - 1; i >= 0; i--) {
-        const angle = (i / (bins - 1)) * wedgeAngle - wedgeAngle / 2
-        ctx.lineTo(Math.cos(angle) * minR, Math.sin(angle) * minR)
-      }
-      ctx.closePath()
-
-      const hA = freqRangeIndex(0, bins)
-      const hB = freqRangeIndex(Math.floor(bins * 0.45), bins)
-      const hC = freqRangeIndex(Math.floor(bins * 0.92), bins)
-      const grad = ctx.createLinearGradient(minR, 0, maxR, 0)
-      grad.addColorStop(0, paletteColor(hA, 0.8))
-      grad.addColorStop(0.5, paletteColor(hB, 0.75))
-      grad.addColorStop(1, paletteColor(hC, 0.55))
-      ctx.fillStyle = grad
+      ctx.arc(0, 0, orbR, 0, Math.PI * 2)
       ctx.fill()
-
-      ctx.beginPath()
-      for (let i = 0; i < bins; i++) {
-        const amp = normAmp(s.dataArray[i])
-        const r = minR + amp * (maxR - minR)
-        const angle = (i / (bins - 1)) * wedgeAngle - wedgeAngle / 2
-        i === 0
-          ? ctx.moveTo(Math.cos(angle) * r, Math.sin(angle) * r)
-          : ctx.lineTo(Math.cos(angle) * r, Math.sin(angle) * r)
-      }
-      const edgeIndex = freqRangeIndex(Math.floor(bins * 0.75), bins)
-      ctx.strokeStyle = paletteColor(edgeIndex, 0.85)
-      ctx.lineWidth = 1.5
-      ctx.shadowColor = paletteColor(edgeIndex, 0.92)
-      ctx.shadowBlur = 12
-      ctx.stroke()
       ctx.shadowBlur = 0
       ctx.restore()
     }
-
-    const bassAmp = s.dataArray.slice(0, 6).reduce((a, b) => a + normAmp(b), 0) / 6
-    const orbR = minR * (0.9 + bassAmp * cfg.orbGain)
-    const orbGrad = ctx.createRadialGradient(0, 0, 0, 0, 0, orbR)
-    const orbBase = freqRangeIndex(2, bins)
-    orbGrad.addColorStop(0, paletteColor(orbBase + 1, 1))
-    orbGrad.addColorStop(0.4, paletteColor(orbBase + 4, 0.8))
-    orbGrad.addColorStop(1, paletteColor(orbBase + 7, 0))
-    ctx.fillStyle = orbGrad
-    ctx.shadowColor = paletteColor(orbBase + 5, 0.9)
-    ctx.shadowBlur = 24
-    ctx.beginPath()
-    ctx.arc(0, 0, orbR, 0, Math.PI * 2)
-    ctx.fill()
-    ctx.shadowBlur = 0
-    ctx.restore()
   }, [])
 
   const drawLine = useCallback((ctx, W, H) => {
@@ -624,6 +673,7 @@ export default function Visualizer() {
     const W = canvas.width
     const H = canvas.height
 
+    s.analyser.smoothingTimeConstant = Math.max(0, Math.min(0.99, controlsRef.current[s.mode]?.smoothing ?? SMOOTHING))
     s.analyser.getByteFrequencyData(s.dataArray)
     s.hueShift = (s.hueShift + HUE_SPEED) % 360
     s.time += 1
@@ -700,13 +750,16 @@ export default function Visualizer() {
       { key: 'spawnThreshold', label: 'Spawn', min: 0.08, max: 0.6, step: 0.01 },
       { key: 'motionGain', label: 'Motion', min: 0.2, max: 2.4, step: 0.01 },
       { key: 'strokeGain', label: 'Stroke', min: 0.4, max: 2.4, step: 0.01 },
+      { key: 'smoothing', label: 'Smooth', min: 0, max: 0.99, step: 0.01 },
     ]
     : activeMode === MODES.CIRCULAR
       ? [
         { key: 'segments', label: 'Segments', min: 4, max: 18, step: 1 },
-        { key: 'trail', label: 'Trail', min: 0.02, max: 0.4, step: 0.01 },
+        { key: 'kaleidoCount', label: 'Count', min: 1, max: 8, step: 1 },
+        { key: 'trail', label: 'Trail', min: 0.02, max: 0.92, step: 0.01 },
         { key: 'spin', label: 'Spin', min: 0, max: 0.01, step: 0.0001 },
         { key: 'orbGain', label: 'Orb', min: 1, max: 7, step: 0.1 },
+        { key: 'smoothing', label: 'Smooth', min: 0, max: 0.99, step: 0.01 },
       ]
       : [
         { key: 'snakeCount', label: 'Count', min: 1, max: 40, step: 1 },
@@ -714,6 +767,7 @@ export default function Visualizer() {
         { key: 'randomTurn', label: 'Turn', min: 0.001, max: 0.09, step: 0.001 },
         { key: 'transientBoost', label: 'Pulse', min: 0.4, max: 12, step: 0.1 },
         { key: 'maxLength', label: 'Length', min: 60, max: 500, step: 1 },
+        { key: 'smoothing', label: 'Smooth', min: 0, max: 0.99, step: 0.01 },
       ]
 
   // ─── render ────────────────────────────────────────────────────────────────
